@@ -1,5 +1,5 @@
 {
-  "name": "faceit-bot",
+  "name": "faceit-verify-bot",
   "version": "1.0.0",
   "main": "index.js",
   "type": "commonjs",
