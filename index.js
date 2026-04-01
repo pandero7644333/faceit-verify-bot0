@@ -16,7 +16,6 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
 
-// 🔥 ROLE MAP
 const roleMap = {
   1: "1488562516668973066",
   2: "1488562786240827392",
@@ -32,34 +31,32 @@ const roleMap = {
 
 const pending = new Map();
 
-
-// 🔎 STEAM ID RESOLVE (ID + PROFILES)
-async function extractSteamID(url) {
-  // jeśli jest już SteamID64
+// STEAM ID
+async function getSteamID(url) {
   const match = url.match(/(\d{17})/);
   if (match) return match[1];
 
-  // jeśli vanity URL (/id/)
-  const vanityMatch = url.match(/steamcommunity\.com\/id\/([^\/]+)/);
-  if (!vanityMatch) return null;
+  const vanity = url.match(/id\/([^\/]+)/)?.[1];
+  if (!vanity) return null;
 
-  const vanity = vanityMatch[1];
+  const res = await axios.get(
+    `https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/?key=${process.env.STEAM_KEY}&vanityurl=${vanity}`
+  );
 
-  try {
-    const res = await axios.get(
-      `https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/?key=${process.env.STEAM_KEY}&vanityurl=${vanity}`
-    );
-
-    return res.data.response.steamid;
-  } catch (err) {
-    console.error("Steam API error:", err);
-    return null;
-  }
+  return res.data.response.steamid;
 }
 
+// STEAM PROFILE
+async function getSteamProfile(steamId) {
+  const res = await axios.get(
+    `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${process.env.STEAM_KEY}&steamids=${steamId}`
+  );
 
-// 🔐 FACEIT API
-async function getFaceitBySteam(steamId) {
+  return res.data.response.players[0];
+}
+
+// FACEIT
+async function getFaceit(steamId) {
   const res = await axios.get(
     `https://open.faceit.com/data/v4/players?game=cs2&game_player_id=${steamId}`,
     {
@@ -72,19 +69,18 @@ async function getFaceitBySteam(steamId) {
   return res.data;
 }
 
-
-// 📌 COMMAND
+// COMMAND
 const commands = [
   new SlashCommandBuilder()
-    .setName("verify")
+    .setName("zweryfikuj")
     .setDescription("FACEIT verify")
     .addSubcommand(sub =>
       sub
-        .setName("faceit")
-        .setDescription("Verify Steam → FACEIT")
+        .setName("ranking")
+        .setDescription("Verify FACEIT")
         .addStringOption(opt =>
           opt.setName("link")
-            .setDescription("Steam profile link")
+            .setDescription("Steam link")
             .setRequired(true)
         )
     )
@@ -92,151 +88,92 @@ const commands = [
 
 const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 
-
-// 🚀 START
 client.once("ready", async () => {
-  console.log(`✅ Logged as ${client.user.tag}`);
-
   await rest.put(
     Routes.applicationCommands(client.user.id),
     { body: commands }
   );
-
-  console.log("✅ Commands ready");
+  console.log("BOT READY");
 });
 
-
-// 💬 INTERACTIONS
 client.on("interactionCreate", async (interaction) => {
 
-  // ===== SLASH =====
   if (interaction.isChatInputCommand()) {
 
-    if (
-      interaction.commandName === "verify" &&
-      interaction.options.getSubcommand() === "faceit"
-    ) {
+    const link = interaction.options.getString("link");
+    const steamId = await getSteamID(link);
 
-      const link = interaction.options.getString("link");
-
-      const steamId = await extractSteamID(link);
-
-      if (!steamId) {
-        return interaction.reply({
-          content: "❌ Nie mogę odczytać Steam ID z linku",
-          ephemeral: true
-        });
-      }
-
-      const code = Math.floor(100000 + Math.random() * 900000).toString();
-
-      pending.set(interaction.user.id, {
-        steamId,
-        code
-      });
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("copy_code")
-          .setLabel("📋 Kopiuj kod")
-          .setStyle(ButtonStyle.Primary),
-
-        new ButtonBuilder()
-          .setCustomId("check_faceit")
-          .setLabel("🔎 Sprawdź FACEIT")
-          .setStyle(ButtonStyle.Success)
-      );
-
-      return interaction.reply({
-        content:
-          `🔐 Wklej ten kod do BIO FACEIT:\n\n` +
-          `**${code}**\n\n` +
-          `Następnie kliknij "Sprawdź FACEIT"`,
-        components: [row],
-        ephemeral: true
-      });
+    if (!steamId) {
+      return interaction.reply({ content: "❌ Zły link", ephemeral: true });
     }
+
+    const faceit = await getFaceit(steamId);
+
+    if (!faceit.player_id) {
+      return interaction.reply({ content: "❌ Brak FACEIT", ephemeral: true });
+    }
+
+    const code = Math.floor(100000 + Math.random() * 900000);
+
+    pending.set(interaction.user.id, {
+      steamId,
+      code
+    });
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("check")
+        .setLabel("🔎 Sprawdź")
+        .setStyle(ButtonStyle.Success)
+    );
+
+    return interaction.reply({
+      content:
+        `🔐 Zmień nazwę Steam na:\n\n` +
+        `**${faceit.nickname} | ${code}**\n\n` +
+        `Następnie kliknij Sprawdź`,
+      components: [row],
+      ephemeral: true
+    });
   }
 
-
-  // ===== BUTTONS =====
   if (interaction.isButton()) {
 
     const data = pending.get(interaction.user.id);
+    if (!data) return;
 
-    if (!data) {
+    const profile = await getSteamProfile(data.steamId);
+
+    if (!profile.personaname.includes(data.code)) {
       return interaction.reply({
-        content: "❌ Brak aktywnej weryfikacji",
+        content: "❌ Kod nie znaleziony w nicku Steam",
         ephemeral: true
       });
     }
 
-    // 📋 COPY
-    if (interaction.customId === "copy_code") {
-      return interaction.reply({
-        content: `📋 Twój kod: **${data.code}**`,
-        ephemeral: true
-      });
-    }
+    const faceit = await getFaceit(data.steamId);
 
-    // 🔎 VERIFY
-    if (interaction.customId === "check_faceit") {
-
-      try {
-        const faceitRes = await getFaceitBySteam(data.steamId);
-
-        if (!faceitRes.player_id) {
-          return interaction.reply({
-            content: "❌ Nie znaleziono konta FACEIT",
-            ephemeral: true
-          });
+    const profileFaceit = await axios.get(
+      `https://open.faceit.com/data/v4/players/${faceit.player_id}`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.FACEIT_KEY}`
         }
-
-        const profile = await axios.get(
-          `https://open.faceit.com/data/v4/players/${faceitRes.player_id}`,
-          {
-            headers: {
-              Authorization: `Bearer ${process.env.FACEIT_KEY}`
-            }
-          }
-        );
-
-        const level = profile.data.games?.cs2?.skill_level;
-
-        if (!level) {
-          return interaction.reply({
-            content: "❌ Brak levelu FACEIT",
-            ephemeral: true
-          });
-        }
-
-        const roleId = roleMap[level];
-        const role = interaction.guild.roles.cache.get(roleId);
-
-        if (!role) {
-          return interaction.reply({
-            content: "❌ Nie znaleziono roli na serwerze",
-            ephemeral: true
-          });
-        }
-
-        await interaction.member.roles.add(role);
-
-        pending.delete(interaction.user.id);
-
-        return interaction.reply({
-          content: `✅ Zweryfikowano! Twój FACEIT Level: **${level}**`,
-          ephemeral: true
-        });
-
-      } catch (err) {
-        console.error(err);
-        return interaction.reply({
-          content: "❌ Błąd FACEIT API",
-          ephemeral: true
-        });
       }
-    }
+    );
+
+    const level = profileFaceit.data.games?.cs2?.skill_level;
+
+    const role = interaction.guild.roles.cache.get(roleMap[level]);
+
+    await interaction.member.roles.add(role);
+
+    pending.delete(interaction.user.id);
+
+    return interaction.reply({
+      content: `✅ Zweryfikowano! Level: ${level}`,
+      ephemeral: true
+    });
   }
 });
 
